@@ -16,18 +16,6 @@ public struct BitBuffer {
         return BigUInt(words: words)
     }
     
-    public subscript(index: Int) -> Bool {
-        get {
-            precondition(0 <= index && index < length)
-            let wordBitSize = MemoryLayout<Word>.size
-            let wordIndex = index / wordBitSize
-            let bitIndex = index % wordBitSize
-            let mask = Word(1) << bitIndex
-            let word = words[wordIndex]
-            return word & mask != 0
-        }
-    }
-    
     public init(data: Data, bitOffset: Int, bitLength: Int) {
         precondition(0 <= bitOffset)
         precondition(bitOffset < 8)
