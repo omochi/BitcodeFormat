@@ -15,6 +15,7 @@ public final class Reader {
         case unknownRecordCode(code: UInt32)
         case invalidRecordOperand
         case blockIDNotSpecified
+        case invalidLengthValue(UInt32)
         
         public var description: String {
             switch self {
@@ -40,6 +41,8 @@ public final class Reader {
                 return "invalid record operand"
             case .blockIDNotSpecified:
                 return "block id is not specified"
+            case .invalidLengthValue(let x):
+                return "invalid length value: \(x)"
             }
         }
     }
@@ -47,15 +50,15 @@ public final class Reader {
     public struct Error : ErrorBase {
         public var message: Message
         public var position: Position?
-        public var blockID: UInt32?
+        public var blockName: String?
         
         public init(message: Message,
                     position: Position?,
-                    blockID: UInt32?)
+                    blockName: String?)
         {
             self.message = message
             self.position = position
-            self.blockID = blockID
+            self.blockName = blockName
         }
         
         public var description: String {
@@ -63,8 +66,8 @@ public final class Reader {
             if let pos = position {
                 s += " at \(pos)"
             }
-            if let bid = blockID {
-                s += " in block \(bid)"
+            if let name = blockName {
+                s += " in \(name)"
             }
             return s
         }
@@ -139,16 +142,16 @@ public final class Reader {
     
     private var blockInfos: [UInt32: BlockInfo]
     
-    private func blockInfo(id: UInt32) -> BlockInfo {
+    private func rootBlockInfo(id: UInt32) -> BlockInfo {
         return blockInfos[id] ?? BlockInfo()
     }
-    private func setBlockInfo(_ info: BlockInfo, id: UInt32) {
+    private func setRootBlockInfo(_ info: BlockInfo, id: UInt32) {
         blockInfos[id] = info
     }
-    private func modifyBlockInfo(id: UInt32, _ f: (inout BlockInfo) -> Void) {
-        var info = blockInfo(id: id)
+    private func modifyRootBlockInfo(id: UInt32, _ f: (inout BlockInfo) -> Void) {
+        var info = rootBlockInfo(id: id)
         f(&info)
-        setBlockInfo(info, id: id)
+        setRootBlockInfo(info, id: id)
     }
     
     public init(data: Data) {
@@ -164,13 +167,25 @@ public final class Reader {
         self.init(data: data)
     }
     
+    private func enter(block: Block) {
+        let name = traceName(ofBlockWithID: block.id)
+        trace("enter \(name) {")
+        let blockInfo = BlockInfo()
+        let state = State(block: block,
+                          blockInfo: blockInfo)
+        pushState(state)
+    }
+    
     private func pushState(_ state: State) {
         stateStack.append(state)
     }
 
-    private func popState() {
+    private func exitBlock() {
         precondition(stateStack.count >= 2)
+        let state = self.state
+        let name = traceName(ofBlockWithID: state.block!.id)
         stateStack.removeLast()
+        trace("} exit \(name)")
     }
     
     private var blockID: UInt32? {
@@ -185,12 +200,14 @@ public final class Reader {
             switch abb {
             case .enterSubBlock(let block):
                 if block.id == Block.BlockInfo.id {
-                    let state = State(block: block)
-                    pushState(state)
+                    enter(block: block)
                     try readBlockInfo()
-                    popState()
+                    exitBlock()
                 } else {
-                    advancePosition(length: castToUInt64(block.length) * 8)
+                    let name = traceName(ofBlockWithID: block.id)
+                    enter(block: block)
+                    try readBlock()
+                    exitBlock()
                 }
             case .endBlock:
                 emitWarning(.endBlockOnTopLevelIgnored)
@@ -198,6 +215,18 @@ public final class Reader {
                 emitWarning(.recordOnTopLevelIgnored)
             }
         }
+    }
+
+    private func name(ofBlockWithID id: UInt32) -> String {
+        if id == 0 {
+            return "BLOCKINFO"
+        }
+        let info = rootBlockInfo(id: id)
+        return info.name ?? ""
+    }
+    
+    private func traceName(ofBlockWithID id: UInt32) -> String {
+        return name(ofBlockWithID: id) + "#\(id)"
     }
     
     private func emitWarning(_ message: Message) {
@@ -210,17 +239,19 @@ public final class Reader {
     
     private func error(_ message: Message,
                        position: Position? = nil) -> Error {
+        let blockID = self.blockID
+        let blockName = blockID.map { traceName(ofBlockWithID: $0) }
         return Error(message: message,
                      position: position ?? self.position,
-                     blockID: blockID)
+                     blockName: blockName)
     }
     
-    public func readMagicNumber() throws -> UInt32 {
+    private func readMagicNumber() throws -> UInt32 {
         let bs = try readBits(length: 32)
         return try castToUInt32(bs.asBigUInt)
     }
     
-    public func readAbbreviation() throws -> Abbreviation {
+    private func readAbbreviation() throws -> Abbreviation {
         while true {
             let abbPos = self.position
             let abbLen = castToInt(state.block?.abbrevIDWidth ?? 2)
@@ -233,7 +264,11 @@ public final class Reader {
                 let blockID = try castToUInt32(readVBR(width: 8))
                 let abbrevLen = try castToUInt8(readVBR(width: 4))
                 skipToAlignment(32)
-                let length = try castToUInt32(readFixed(width: 32)) * 4
+                let lengthInWord = try castToUInt32(try readFixed(width: 32))
+                let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
+                if ovf {
+                    throw error(.invalidLengthValue(lengthInWord))
+                }
                 let block = Block(id: blockID,
                                   abbrevIDWidth: abbrevLen,
                                   length: length)
@@ -249,34 +284,50 @@ public final class Reader {
                 let record = Record(code: code, operands: operands)
                 return .record(record)
             default:
-                emitWarning(Error(message: .unknownAbbrevID(abbrevID),
-                                  position: abbPos,
-                                  blockID: blockID))
+                throw error(.unknownAbbrevID(abbrevID),
+                            position: abbPos)
             }
         }
     }
     
-    public func readBlockInfo() throws {
+    private func readBlock() throws {
+        while true {
+            let abb = try readAbbreviation()
+            
+            switch abb {
+            case .enterSubBlock(let subBlock):
+                enter(block: subBlock)
+                try readBlock()
+                exitBlock()
+            case .endBlock:
+                return
+            case .record(let record):
+                print(record)
+            }
+        }
+    }
+    
+    private func readBlockInfo() throws {
         var targetBlockID: UInt32?
         
         func modifyBlockInfo(_ f: (inout BlockInfo) -> Void) throws {
             guard let id = targetBlockID else {
                 throw error(.blockIDNotSpecified)
             }
-            self.modifyBlockInfo(id: id, f)
+            self.modifyRootBlockInfo(id: id, f)
         }
         
         while true {
             let abb = try readAbbreviation()
             
-            do {
-                switch abb {
-                case .enterSubBlock(let block):
-                    emitWarning(.subBlockInBlockInfoIgnored)
-                    advancePosition(length: castToUInt64(block.length))
-                case .endBlock:
-                    return
-                case .record(let record):
+            switch abb {
+            case .enterSubBlock(let block):
+                emitWarning(.subBlockInBlockInfoIgnored)
+                advancePosition(length: castToUInt64(block.length))
+            case .endBlock:
+                return
+            case .record(let record):
+                do {
                     switch record.code {
                     case Block.BlockInfo.SetBID.id:
                         if record.operands.count <= 0 {
@@ -302,15 +353,15 @@ public final class Reader {
                             }
                         }
                     default:
-                        emitWarning(.unknownRecordCode(code: record.code))
+                        throw error(.unknownRecordCode(code: record.code))
                     }
-                }
-            } catch {
-                switch error {
-                case let error as Error:
-                    emitWarning(error)
-                default:
-                    throw error
+                } catch {
+                    switch error {
+                    case let error as Error:
+                        emitWarning(error)
+                    default:
+                        throw error
+                    }
                 }
             }
         }
@@ -383,6 +434,12 @@ public final class Reader {
     
     private var isEnd: Bool {
         return position.offset >= UInt64(data.count)
+    }
+    
+    private func trace(_ message: String) {
+        let indent = String(repeating: "  ", count: (stateStack.count - 1) * 2)
+        let str = indent + message
+        print(str)
     }
     
     private func _readData(position _pos: UInt64, size: Int) throws -> Data {
