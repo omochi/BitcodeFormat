@@ -5,16 +5,16 @@ public final class Reader {
     public enum Message : CustomStringConvertible {
         case reachedEndOfFile
         case invalidFilePosition(UInt64)
-        case unknownAbbrevID(UInt32)
-        case noExpectedEndBlock
         case primitiveOutOfRange(BigUInt)
-        case invalidRecordOperand
         
+        case unknownAbbrevID(UInt32)
         case endBlockOnTopLevelIgnored
         case recordOnTopLevelIgnored
         case subBlockInBlockInfoIgnored
         case utf8DecodeFailed
         case unknownRecordCode(code: UInt32)
+        case invalidRecordOperand
+        case blockIDNotSpecified
         
         public var description: String {
             switch self {
@@ -22,14 +22,10 @@ public final class Reader {
                 return "reached end of file"
             case .invalidFilePosition(let x):
                 return "invalid file position: \(x)"
-            case .unknownAbbrevID(let id):
-                return "unknown abbrev ID: \(id)"
-            case .noExpectedEndBlock:
-                return "no expected END_BLOCK"
             case .primitiveOutOfRange(let x):
                 return "primitive is out of range: \(x)"
-            case .invalidRecordOperand:
-                return "invalid record operand"
+            case .unknownAbbrevID(let id):
+                return "unknown abbrev ID: \(id)"
             case .endBlockOnTopLevelIgnored:
                 return "END_BLOCK on top lebel ignored"
             case .recordOnTopLevelIgnored:
@@ -40,6 +36,10 @@ public final class Reader {
                 return "utf-8 decode failed"
             case .unknownRecordCode(code: let code):
                 return "unknown record code: \(code)"
+            case .invalidRecordOperand:
+                return "invalid record operand"
+            case .blockIDNotSpecified:
+                return "block id is not specified"
             }
         }
     }
@@ -83,8 +83,46 @@ public final class Reader {
         }
     }
     
+    public struct BlockInfo {
+        public struct RecordInfo {
+            public var name: String? = nil
+        }
+        
+        public var name: String?
+        public var recordInfos: [UInt32: RecordInfo]
+        
+        public init(name: String? = nil,
+                    recordInfos: [UInt32: RecordInfo] = [:])
+        {
+            self.name = name
+            self.recordInfos = recordInfos
+        }
+        
+        public func recordInfo(id: UInt32) -> RecordInfo {
+            return recordInfos[id] ?? RecordInfo()
+        }
+        
+        public mutating func setRecordInfo(_ info: RecordInfo, id: UInt32) {
+            recordInfos[id] = info
+        }
+        
+        public mutating func modifyRecordInfo(id: UInt32, _ f: (inout RecordInfo) -> Void) {
+            var info = recordInfo(id: id)
+            f(&info)
+            setRecordInfo(info, id: id)
+        }
+    }
+    
     public struct State {
         public var block: Block?
+        public var blockInfo: BlockInfo
+        
+        public init(block: Block?,
+                    blockInfo: BlockInfo = BlockInfo())
+        {
+            self.block = block
+            self.blockInfo = blockInfo
+        }
     }
     
     private let data: Data
@@ -99,11 +137,26 @@ public final class Reader {
     }
     private var stateStack: [State]
     
+    private var blockInfos: [UInt32: BlockInfo]
+    
+    private func blockInfo(id: UInt32) -> BlockInfo {
+        return blockInfos[id] ?? BlockInfo()
+    }
+    private func setBlockInfo(_ info: BlockInfo, id: UInt32) {
+        blockInfos[id] = info
+    }
+    private func modifyBlockInfo(id: UInt32, _ f: (inout BlockInfo) -> Void) {
+        var info = blockInfo(id: id)
+        f(&info)
+        setBlockInfo(info, id: id)
+    }
+    
     public init(data: Data) {
         self.data = data
         self.position = Position(offset: 0, bitOffset: 0)
         let state = State(block: nil)
         self.stateStack = [state]
+        self.blockInfos = [:]
     }
     
     public convenience init(file: URL) throws {
@@ -118,6 +171,10 @@ public final class Reader {
     private func popState() {
         precondition(stateStack.count >= 2)
         stateStack.removeLast()
+    }
+    
+    private var blockID: UInt32? {
+        return state.block?.id
     }
     
     public func read() throws {
@@ -155,7 +212,7 @@ public final class Reader {
                        position: Position? = nil) -> Error {
         return Error(message: message,
                      position: position ?? self.position,
-                     blockID: state.block?.id)
+                     blockID: blockID)
     }
     
     public func readMagicNumber() throws -> UInt32 {
@@ -164,73 +221,110 @@ public final class Reader {
     }
     
     public func readAbbreviation() throws -> Abbreviation {
-        let abbPos = self.position
-        let abbLen = castToInt(state.block?.abbrevIDWidth ?? 2)
-        let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
-        switch abbrevID {
-        case Abbreviation.EndBlock.id:
-            skipToAlignment(32)
-            return .endBlock
-        case Abbreviation.EnterSubBlock.id:
-            let blockID = try castToUInt32(readVBR(width: 8))
-            let abbrevLen = try castToUInt8(readVBR(width: 4))
-            skipToAlignment(32)
-            let length = try castToUInt32(readFixed(width: 32)) * 4
-            let block = Block(id: blockID,
-                              abbrevIDWidth: abbrevLen,
-                              length: length)
-            return .enterSubBlock(block)
-        case Abbreviation.UnabbrevRecord.id:
-            let code = try castToUInt32(readVBR(width: 6))
-            let opsNum = try castToUInt32(readVBR(width: 6))
-            var operands: [UInt64] = []
-            for _ in 0..<opsNum {
-                let op = try castToUInt64(readVBR(width: 6))
-                operands.append(op)
+        while true {
+            let abbPos = self.position
+            let abbLen = castToInt(state.block?.abbrevIDWidth ?? 2)
+            let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
+            switch abbrevID {
+            case Abbreviation.EndBlock.id:
+                skipToAlignment(32)
+                return .endBlock
+            case Abbreviation.EnterSubBlock.id:
+                let blockID = try castToUInt32(readVBR(width: 8))
+                let abbrevLen = try castToUInt8(readVBR(width: 4))
+                skipToAlignment(32)
+                let length = try castToUInt32(readFixed(width: 32)) * 4
+                let block = Block(id: blockID,
+                                  abbrevIDWidth: abbrevLen,
+                                  length: length)
+                return .enterSubBlock(block)
+            case Abbreviation.UnabbrevRecord.id:
+                let code = try castToUInt32(readVBR(width: 6))
+                let opsNum = try castToUInt32(readVBR(width: 6))
+                var operands: [UInt64] = []
+                for _ in 0..<opsNum {
+                    let op = try castToUInt64(readVBR(width: 6))
+                    operands.append(op)
+                }
+                let record = Record(code: code, operands: operands)
+                return .record(record)
+            default:
+                emitWarning(Error(message: .unknownAbbrevID(abbrevID),
+                                  position: abbPos,
+                                  blockID: blockID))
             }
-            let record = Record(code: code, operands: operands)
-            return .record(record)
-        default:
-            throw error(.unknownAbbrevID(abbrevID), position: abbPos)
         }
     }
     
     public func readBlockInfo() throws {
-        var blockID: UInt32?
+        var targetBlockID: UInt32?
+        
+        func modifyBlockInfo(_ f: (inout BlockInfo) -> Void) throws {
+            guard let id = targetBlockID else {
+                throw error(.blockIDNotSpecified)
+            }
+            self.modifyBlockInfo(id: id, f)
+        }
+        
         while true {
             let abb = try readAbbreviation()
             
-            switch abb {
-            case .enterSubBlock(let block):
-                emitWarning(.subBlockInBlockInfoIgnored)
-                advancePosition(length: castToUInt64(block.length))
-            case .endBlock:
-                return
-            case .record(let record):
-                switch record.code {
-                case Block.BlockInfo.SetBID.id:
-                    if record.operands.count <= 0 {
-                        throw error(.invalidRecordOperand, position: position)
+            do {
+                switch abb {
+                case .enterSubBlock(let block):
+                    emitWarning(.subBlockInBlockInfoIgnored)
+                    advancePosition(length: castToUInt64(block.length))
+                case .endBlock:
+                    return
+                case .record(let record):
+                    switch record.code {
+                    case Block.BlockInfo.SetBID.id:
+                        if record.operands.count <= 0 {
+                            throw error(.invalidRecordOperand)
+                        }
+                        targetBlockID = try castToUInt32(record.operands[0])
+                    case Block.BlockInfo.BlockName.id:
+                        let name = try decodeOperandsString(record.operands)
+                        try modifyBlockInfo { (info) in
+                            info.name = name
+                        }
+                    case Block.BlockInfo.SetRecordName.id:
+                        var operands = record.operands
+                        if operands.count <= 0 {
+                            throw error(.invalidRecordOperand)
+                        }
+                        let recordID = try castToUInt32(operands[0])
+                        operands.removeFirst()
+                        let name = try decodeOperandsString(operands)
+                        try modifyBlockInfo { (info) in
+                            info.modifyRecordInfo(id: recordID) { (info) in
+                                info.name = name
+                            }
+                        }
+                    default:
+                        emitWarning(.unknownRecordCode(code: record.code))
                     }
-                    blockID = try castToUInt32(record.operands[0])
-                case Block.BlockInfo.BlockName.id:
-                    var data = Data()
-                    for o in record.operands {
-                        data.append(try castToUInt8(o))
-                    }
-                    guard let string = String(data: data, encoding: .utf8) else {
-                        throw error(.utf8DecodeFailed, position: position)
-                    }
-                    print(string)
-                case Block.BlockInfo.SetRecordName.id:
-                    break
+                }
+            } catch {
+                switch error {
+                case let error as Error:
+                    emitWarning(error)
                 default:
-                    break
+                    throw error
                 }
             }
-            
         }
-        
+    }
+    
+    private func decodeOperandsString(_ operands: [UInt64]) throws -> String {
+        var data = Data()
+        for o in operands {
+            data.append(try castToUInt8(o))
+        }
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw error(.utf8DecodeFailed)
+        }
+        return string
     }
     
     public func readFixed(width: Int) throws -> BigUInt {
@@ -301,13 +395,6 @@ public final class Reader {
         }
         
         return data.subdata(in: position..<(position + size))
-    }
-    
-    private func operand(at index: Int, for record: Record) throws -> UInt64 {
-        guard 0 <= index, index < record.operands.count else {
-            throw error(.invalidRecordOperand, position: position)
-        }
-        return record.operands[index]
     }
     
     private func castToUInt8(_ a: UInt64) throws -> UInt8 { return try intCast(a) }

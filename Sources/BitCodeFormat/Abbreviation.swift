@@ -11,13 +11,10 @@ public enum Abbreviation {
     public enum UnabbrevRecord {
         public static let id: UInt32 = 3
     }
+
+    // TODO: define abbriv
     
     case endBlock
     case enterSubBlock(Block)
-//    case endBlock
     case record(Record)
-//    case defineAbbrev(DefineAbbrev)
-//    case user(User)
-    
-//    public struct Un
 }
