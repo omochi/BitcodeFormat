@@ -98,38 +98,31 @@ public final class Reader {
     public struct BlockInfo {
         public struct RecordInfo {
             public var name: String?
-            public var define: DefineAbbrev?
-            
-            public init(name: String? = nil,
-                        define: DefineAbbrev? = nil)
+            public init(name: String? = nil)
             {
                 self.name = name
-                self.define = define
             }
         }
         
         public var name: String?
-        public var recordInfos: [(UInt32, RecordInfo)]
+        public var recordInfos: [UInt32: RecordInfo]
+        public var abbrevDefinitions: [(UInt32, DefineAbbrev)]
         
         public init(name: String? = nil,
-                    recordInfos: [(UInt32, RecordInfo)] = [])
+                    recordInfos: [UInt32: RecordInfo] = [:],
+                    abbrevDefinitions: [(UInt32, DefineAbbrev)] = [])
         {
             self.name = name
             self.recordInfos = recordInfos
+            self.abbrevDefinitions = abbrevDefinitions
         }
         
         public func recordInfo(id: UInt32) -> RecordInfo {
-            return recordInfos
-                .first { $0.0 == id }
-                .map { $0.1 } ?? RecordInfo()
+            return recordInfos[id] ?? RecordInfo()
         }
         
         public mutating func setRecordInfo(_ info: RecordInfo, id: UInt32) {
-            guard let index = (recordInfos.firstIndex { $0.0 == id }) else {
-                recordInfos.append((id, info))
-                return
-            }
-            recordInfos[index] = (id, info)
+            recordInfos[id] = info
         }
         
         public mutating func modifyRecordInfo(id: UInt32, _ f: (inout RecordInfo) -> Void) {
@@ -139,14 +132,16 @@ public final class Reader {
         }
         
         public var nextDefineRecordID: UInt32 {
-            return recordInfos.map { $0.0 }.max().map { $0 + 1 } ?? 4
+            return abbrevDefinitions.map { $0.0 }.max().map { $0 + 1 } ?? 4
+        }
+        
+        public func abbrevDefinition(for id: UInt32) -> DefineAbbrev? {
+            return abbrevDefinitions.first { $0.0 == id }.map { $0.1 }
         }
         
         public mutating func defineAbbrev(_ define: DefineAbbrev) {
             let id = nextDefineRecordID
-            modifyRecordInfo(id: id) { (info) in
-                info.define = define
-            }
+            abbrevDefinitions.append((id, define))
         }
     }
     
@@ -361,8 +356,20 @@ public final class Reader {
                 let record = Record(code: code, operands: operands)
                 return .unabbrevRecord(record)
             default:
-                throw error(.unknownAbbrevID(abbrevID),
-                            position: abbPos)
+                guard let define = state.blockInfo.abbrevDefinition(for: abbrevID) else {
+                    throw error(.unknownAbbrevID(abbrevID),
+                                position: abbPos)
+                }
+                for operand in define.operands {
+                    switch operand {
+                    case .literal(value: let literalValue):
+                        
+                        
+                        
+                    default:
+                        fatalError("TODO")
+                    }
+                }
             }
         }
     }
