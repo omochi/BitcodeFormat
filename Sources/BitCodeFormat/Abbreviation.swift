@@ -2,10 +2,14 @@ import Foundation
 import BigInt
 
 public enum Abbreviation {
-    public enum ID: UInt32 {
-        case endBlock = 0
-        case enterSubBlock = 1
-        case unabbrevRecord = 3
+    public enum EndBlock {
+        public static let id: UInt32 = 0
+    }
+    public enum EnterSubBlock {
+        public static let id: UInt32 = 1
+    }
+    public enum UnabbrevRecord {
+        public static let id: UInt32 = 3
     }
     
     case endBlock
