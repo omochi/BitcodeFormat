@@ -38,6 +38,10 @@ public final class Block {
     
     public var name: String {
         func _name() -> String? {
+            if id == 0 {
+                return "BLOCKINFO"
+            }
+            
             guard let document = self.document else {
                 return nil
             }

@@ -100,7 +100,7 @@ public final class Reader {
             throw error("invalid enter block position")
         }
 
-        trace("enter \(block.name) {")
+        trace("\(block.name) {")
         let blockInfo = document.blockInfos.items[block.id]
         let state = State(block: block,
                           abbrevDefinitions: blockInfo?.abbrevDefinitions ?? AbbrevDefinitions(),
@@ -117,7 +117,7 @@ public final class Reader {
         let state = self.state
         let block = state.block!
         stateStack.removeLast()
-        trace("} exit \(block.name)")
+        trace("} \(block.name)")
         
         guard position.bitOffset == 0 else {
             throw error("invalid exit block position")
@@ -285,9 +285,11 @@ public final class Reader {
             case .defineAbbrev(let defAbb):
                 state.abbrevDefinitions.add(defAbb)
             case .unabbrevRecord(let record):
+                trace("\(record.name)")
                 currentBlock!.records.append(record)
                 break
             case .definedRecord(let record):
+                trace("\(record.name)")
                 currentBlock!.records.append(record)
                 break
             }
