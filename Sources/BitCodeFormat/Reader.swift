@@ -100,8 +100,7 @@ public final class Reader {
             throw error("invalid enter block position")
         }
 
-        let name = document.debugBlockName(id: block.id)
-        trace("enter \(name) {")
+        trace("enter \(block.name) {")
         let blockInfo = document.blockInfos.items[block.id]
         let state = State(block: block,
                           abbrevDefinitions: blockInfo?.abbrevDefinitions ?? AbbrevDefinitions(),
@@ -117,9 +116,8 @@ public final class Reader {
         precondition(stateStack.count >= 2)
         let state = self.state
         let block = state.block!
-        let name = document.debugBlockName(id: block.id)
         stateStack.removeLast()
-        trace("} exit \(name)")
+        trace("} exit \(block.name)")
         
         guard position.bitOffset == 0 else {
             throw error("invalid exit block position")
@@ -176,7 +174,7 @@ public final class Reader {
     
     private func error(_ message: String,
                        position: Position? = nil) -> Error {
-        let blockName = currentBlock.map { document.debugBlockName(id: $0.id) }
+        let blockName = currentBlock.map { $0.name }
         return Error(message: message,
                      position: position ?? self.position,
                      blockName: blockName)

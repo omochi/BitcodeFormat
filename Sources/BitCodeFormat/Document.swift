@@ -72,23 +72,4 @@ public final class Document {
         self.blockInfos = blockInfos
         self.blocks = blocks
     }
-    
-    public func blockName(id: UInt32) -> String {
-        if id == 0 {
-            return "BLOCKINFO"
-        }
-        return blockInfos.items[id]?.name ?? ""
-    }
-    
-    public func debugBlockName(id: UInt32) -> String {
-        return blockName(id: id) + "#\(id)"
-    }
-    
-    public func recordName(id: UInt32, blockID: UInt32) -> String {
-        return blockInfos.items[id]?.recordInfos.items[id]?.name ?? ""
-    }
-    
-    public func debugRecordName(id: UInt32, blockID: UInt32) -> String {
-        return recordName(id: id, blockID: blockID) + "#\(id)"
-    }
 }

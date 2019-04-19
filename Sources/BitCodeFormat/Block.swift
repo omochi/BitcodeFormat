@@ -35,4 +35,15 @@ public final class Block {
         self.records = []
         self.blocks = []
     }
+    
+    public var name: String {
+        func _name() -> String? {
+            guard let document = self.document else {
+                return nil
+            }
+            return document.blockInfos.items[id]?.name
+        }
+        
+        return (_name() ?? "") + "#\(id)"
+    }
 }

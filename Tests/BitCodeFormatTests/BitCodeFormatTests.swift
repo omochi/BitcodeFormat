@@ -2,14 +2,11 @@ import XCTest
 import BitCodeFormat
 
 final class BitCodeFormatTests: XCTestCase {
-    func testExample() throws {
+    func test1() throws {
         let file = try Resources.findResourceDirectory()
             .appendingPathComponent("Test/xcbox.swiftmodule")
         let reader = try Reader(file: file)
-        try reader.read()
+        let document = try reader.read()
+        _ = document
     }
-
-    static var allTests = [
-        ("testExample", testExample),
-    ]
 }

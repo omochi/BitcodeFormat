@@ -36,10 +36,18 @@ public final class Record {
         self.code = code
         self.values = values
     }
-}
-
-extension Record : CustomReflectable {
-    public var customMirror: Mirror {
-        return Mirror(
+    
+    public var name: String {
+        func _name() -> String? {
+            guard let block = self.block,
+                let document = block.document else
+            {
+                return nil
+            }
+            
+            return document.blockInfos.items[block.id]?.recordInfos.items[code]?.name
+        }
+        
+        return (_name() ?? "") + "#\(code)"
     }
 }
