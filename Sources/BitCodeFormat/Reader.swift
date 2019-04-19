@@ -279,14 +279,23 @@ public final class Reader {
                                   length: length)
                 return .enterSubBlock(block)
             case DefineAbbrev.id:
-                let opsNum = try castToUInt32(readVBR(width: 5))
-                guard opsNum >= 1 else {
+                let num = try castToUInt32(readVBR(width: 5))
+                guard num >= 1 else {
                     throw error("no operand for DEFINE_ABBREV")
                 }
+                let numInt = try castToInt(num)
+                
                 var operands: [DefineAbbrev.Operand] = []
-                while operands.count < opsNum {
-                    let op = try readDefineOperand()
+                var count: Int = 0
+                while true {
+                    let op = try readDefineOperand(count: &count)
                     operands.append(op)
+                    if count > numInt {
+                        throw error("DEFINE_ABBREV operand count overflow")
+                    }
+                    if count == numInt {
+                        break
+                    }
                 }
                 let defAbb = DefineAbbrev(operands: operands)
                 return .defineAbbrev(defAbb)
@@ -340,10 +349,12 @@ public final class Reader {
             case .defineAbbrev(let defAbb):
                 state.abbrevDefinitions.add(defAbb)
             case .unabbrevRecord(let record):
-                dump(record)
+                break
+//                dump(record)
             case .definedRecord(let record, abbrevID: let abbID):
-                print(abbID)
-                dump(record)
+//                print(abbID)
+//                dump(record)
+                break
             }
         }
     }
@@ -364,7 +375,7 @@ public final class Reader {
             switch abb {
             case .enterSubBlock(let block):
                 emitWarning("ENTER_SUBBLOCK in BLOCKINFO is ignored")
-                advancePosition(length: castToUInt64(block.length))
+                advancePosition(lengthInBits: castToUInt64(block.length))
             case .endBlock:
                 return
             case .defineAbbrev(let defAbb):
@@ -445,7 +456,9 @@ public final class Reader {
         }
     }
     
-    private func readDefineOperand() throws -> DefineAbbrev.Operand {
+    private func readDefineOperand(count: inout Int) throws -> DefineAbbrev.Operand {
+        count += 1
+        
         let isLiteral = try castToUInt8(readFixed(width: 1)) != 0
         if isLiteral {
             let value = try castToUInt64(readVBR(width: 8))
@@ -461,7 +474,7 @@ public final class Reader {
             let width = try castToUInt8(readVBR(width: 5))
             return .vbr(width: width)
         case DefineAbbrev.Array.code:
-            let type = try readDefineOperand()
+            let type = try readDefineOperand(count: &count)
             return .array(type: type)
         case DefineAbbrev.Char6.code:
             return .char6
@@ -529,7 +542,9 @@ public final class Reader {
     
     private func readBlobData(size: Int) throws -> Data {
         precondition(position.bitOffset == 0)
-        return try _readData(position: position.offset, size: size)
+        let data = try _readData(position: position.offset, size: size)
+        advancePosition(lengthInBits: try castToUInt64(size) * 8)
+        return data
     }
     
     private func skipToAlignment(_ alignment: Int) {
@@ -538,7 +553,7 @@ public final class Reader {
         if rem == 0 {
             return
         }
-        advancePosition(length: UInt64(alignment - rem))
+        advancePosition(lengthInBits: UInt64(alignment - rem))
     }
 
     private func readBits(length: Int) throws -> BitBuffer {
@@ -547,13 +562,13 @@ public final class Reader {
         let readSize = (bitOffset + length - 1) / 8 + 1
         let data = try _readData(position: position.offset, size: readSize)
         let bits = BitBuffer(data: data, bitOffset: bitOffset, bitLength: length)
-        advancePosition(length: UInt64(length))
+        advancePosition(lengthInBits: try castToUInt64(length))
         return bits
     }
     
-    private func advancePosition(length: UInt64) {
-        position.offset += UInt64(length / 8)
-        position.bitOffset += UInt8(length % 8)
+    private func advancePosition(lengthInBits: UInt64) {
+        position.offset += UInt64(lengthInBits / 8)
+        position.bitOffset += UInt8(lengthInBits % 8)
         while position.bitOffset >= 8 {
             position.offset += 1
             position.bitOffset -= 8
@@ -589,6 +604,7 @@ public final class Reader {
     private func castToUInt32(_ a: BigUInt) throws -> UInt32 { return try intCast(a) }
     private func castToUInt64(_ a: UInt8) -> UInt64 { return UInt64(a) }
     private func castToUInt64(_ a: UInt32) -> UInt64 { return UInt64(a) }
+    private func castToUInt64(_ a: Int) throws -> UInt64 { return try intCast(a) }
     private func castToUInt64(_ a: BigUInt) throws -> UInt64 { return try intCast(a) }
     private func castToInt(_ a: UInt8) -> Int { return Int(a) }
     private func castToInt(_ a: UInt32) throws -> Int { return try intCast(a) }
