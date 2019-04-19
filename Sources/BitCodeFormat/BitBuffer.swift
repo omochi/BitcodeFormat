@@ -33,7 +33,7 @@ public struct BitBuffer {
         var total = BigUInt(0)
         var totalBitLength = 0
         for index in startIndex..<endIndex {
-            var byte = BigUInt(data[index])
+            var byte = BigUInt(data[data.startIndex + index])
             var byteBitLength = 8
             if index + 1 == endIndex {
                 let lastBitOffset = (bitOffset + bitLength) % 8

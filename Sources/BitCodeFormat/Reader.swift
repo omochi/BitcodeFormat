@@ -2,66 +2,12 @@ import Foundation
 import BigInt
 
 public final class Reader {
-    public enum Message : CustomStringConvertible {
-        case reachedEndOfFile
-        case invalidFilePosition(UInt64)
-        case primitiveOutOfRange(BigUInt)
-        
-        case unknownAbbrevID(UInt32)
-        case unknownDefineAbbrevOperandCode(UInt8)
-        case blobMustBeLast
-        case endBlockOnTopLevelIgnored
-        case defineAbbrevOnTopLevelIgnored
-        case unabbrevRecordOnTopLevelIgnored
-        case subBlockInBlockInfoIgnored
-        case utf8DecodeFailed
-        case unknownRecordCode(code: UInt32)
-        case invalidRecordOperand
-        case blockIDNotSpecified
-        case invalidLengthValue(UInt32)
-        
-        public var description: String {
-            switch self {
-            case .reachedEndOfFile:
-                return "reached end of file"
-            case .invalidFilePosition(let x):
-                return "invalid file position: \(x)"
-            case .primitiveOutOfRange(let x):
-                return "primitive is out of range: \(x)"
-            case .unknownAbbrevID(let id):
-                return "unknown abbrev ID: \(id)"
-            case .unknownDefineAbbrevOperandCode(let code):
-                return "unknown DEFINE_ABBREV operand code: \(code)"
-            case .blobMustBeLast:
-                return "Blob must be last operand"
-            case .endBlockOnTopLevelIgnored:
-                return "END_BLOCK on top lebel ignored"
-            case .defineAbbrevOnTopLevelIgnored:
-                return "DEFINE_ABBREV on top level ignored"
-            case .unabbrevRecordOnTopLevelIgnored:
-                return "UNABBREV_RECORD on top level ignored"
-            case .subBlockInBlockInfoIgnored:
-                return "subblock in BLOCKINFO ignored"
-            case .utf8DecodeFailed:
-                return "utf-8 decode failed"
-            case .unknownRecordCode(code: let code):
-                return "unknown record code: \(code)"
-            case .invalidRecordOperand:
-                return "invalid record operand"
-            case .blockIDNotSpecified:
-                return "block id is not specified"
-            case .invalidLengthValue(let x):
-                return "invalid length value: \(x)"
-            }
-        }
-    }
-    
     public struct Error : ErrorBase {
-        public var message: Message
+        public var message: String
         public var position: Position?
         public var blockName: String?
         
-        public init(message: Message,
+        public init(message: String,
                     position: Position?,
                     blockName: String?)
         {
@@ -87,11 +33,31 @@ public final class Reader {
         public var bitOffset: UInt8
         
         public var description: String {
-            var str = String(format: "0x%08x", offset)
+            var str = "\(offset)"
             if bitOffset != 0 {
                 str += "#\(bitOffset)"
             }
             return str
+        }
+    }
+    
+    public struct AbbrevDefinitions {
+        public var items: [(UInt32, DefineAbbrev)]
+        public init() {
+            self.items = []
+        }
+        
+        public var nextID: UInt32 {
+            return items.map { $0.0 }.max().map { $0 + 1 } ?? 4
+        }
+        
+        public func get(for id: UInt32) -> DefineAbbrev? {
+            return items.first { $0.0 == id }.map { $0.1 }
+        }
+        
+        public mutating func add(_ define: DefineAbbrev) {
+            let id = nextID
+            items.append((id, define))
         }
     }
     
@@ -106,11 +72,11 @@ public final class Reader {
         
         public var name: String?
         public var recordInfos: [UInt32: RecordInfo]
-        public var abbrevDefinitions: [(UInt32, DefineAbbrev)]
+        public var abbrevDefinitions: AbbrevDefinitions
         
         public init(name: String? = nil,
                     recordInfos: [UInt32: RecordInfo] = [:],
-                    abbrevDefinitions: [(UInt32, DefineAbbrev)] = [])
+                    abbrevDefinitions: AbbrevDefinitions = AbbrevDefinitions())
         {
             self.name = name
             self.recordInfos = recordInfos
@@ -130,30 +96,20 @@ public final class Reader {
             f(&info)
             setRecordInfo(info, id: id)
         }
-        
-        public var nextDefineRecordID: UInt32 {
-            return abbrevDefinitions.map { $0.0 }.max().map { $0 + 1 } ?? 4
-        }
-        
-        public func abbrevDefinition(for id: UInt32) -> DefineAbbrev? {
-            return abbrevDefinitions.first { $0.0 == id }.map { $0.1 }
-        }
-        
-        public mutating func defineAbbrev(_ define: DefineAbbrev) {
-            let id = nextDefineRecordID
-            abbrevDefinitions.append((id, define))
-        }
     }
     
     public struct State {
         public var block: Block?
-        public var blockInfo: BlockInfo
+        public var abbrevDefinitions: AbbrevDefinitions
+        public var enterPosition: UInt64
         
         public init(block: Block?,
-                    blockInfo: BlockInfo = BlockInfo())
+                    abbrevDefinitions: AbbrevDefinitions = AbbrevDefinitions(),
+                    enterPosition: UInt64)
         {
             self.block = block
-            self.blockInfo = blockInfo
+            self.abbrevDefinitions = abbrevDefinitions
+            self.enterPosition = enterPosition
         }
     }
     
@@ -186,7 +142,7 @@ public final class Reader {
     public init(data: Data) {
         self.data = data
         self.position = Position(offset: 0, bitOffset: 0)
-        let state = State(block: nil)
+        let state = State(block: nil, enterPosition: 0)
         self.stateStack = [state]
         self.blockInfos = [:]
     }
@@ -196,12 +152,17 @@ public final class Reader {
         self.init(data: data)
     }
     
-    private func enter(block: Block) {
+    private func enter(block: Block) throws {
+        guard position.bitOffset == 0 else {
+            throw error("invalid enter block position")
+        }
+
         let name = traceName(ofBlockWithID: block.id)
         trace("enter \(name) {")
         let blockInfo = rootBlockInfo(id: block.id)
         let state = State(block: block,
-                          blockInfo: blockInfo)
+                          abbrevDefinitions: blockInfo.abbrevDefinitions,
+                          enterPosition: self.position.offset)
         pushState(state)
     }
     
@@ -209,12 +170,21 @@ public final class Reader {
         stateStack.append(state)
     }
 
-    private func exitBlock() {
+    private func exitBlock() throws {
         precondition(stateStack.count >= 2)
         let state = self.state
-        let name = traceName(ofBlockWithID: state.block!.id)
+        let block = state.block!
+        let name = traceName(ofBlockWithID: block.id)
         stateStack.removeLast()
         trace("} exit \(name)")
+        
+        guard position.bitOffset == 0 else {
+            throw error("invalid exit block position")
+        }
+        
+        guard state.enterPosition + castToUInt64(block.length) == self.position.offset else {
+            throw error("invalid exit block position, enter=\(state.enterPosition), length=\(block.length)")
+        }
     }
     
     private var blockID: UInt32? {
@@ -229,21 +199,22 @@ public final class Reader {
             switch abb {
             case .enterSubBlock(let block):
                 if block.id == Block.BlockInfo.id {
-                    enter(block: block)
+                    try enter(block: block)
                     try readBlockInfo()
-                    exitBlock()
+                    try exitBlock()
                 } else {
-                    let name = traceName(ofBlockWithID: block.id)
-                    enter(block: block)
+                    try enter(block: block)
                     try readBlock()
-                    exitBlock()
+                    try exitBlock()
                 }
             case .endBlock:
-                emitWarning(.endBlockOnTopLevelIgnored)
+                emitWarning("END_BLOCK on top level is ignored")
             case .defineAbbrev:
-                emitWarning(.defineAbbrevOnTopLevelIgnored)
+                emitWarning("DEFINE_ABBREV on top level is ignored")
             case .unabbrevRecord:
-                emitWarning(.unabbrevRecordOnTopLevelIgnored)
+                emitWarning("UNABBREV_RECORD on top level is ignored")
+            case .definedRecord(let record, abbrevID: let abbID):
+                emitWarning("record(\(record.code)) on top level is ignored")
             }
         }
     }
@@ -260,7 +231,7 @@ public final class Reader {
         return name(ofBlockWithID: id) + "#\(id)"
     }
     
-    private func emitWarning(_ message: Message) {
+    private func emitWarning(_ message: String) {
         emitWarning(error(message))
     }
     
@@ -268,7 +239,7 @@ public final class Reader {
         print("[WARN] \(warning)")
     }
     
-    private func error(_ message: Message,
+    private func error(_ message: String,
                        position: Position? = nil) -> Error {
         let blockID = self.blockID
         let blockName = blockID.map { traceName(ofBlockWithID: $0) }
@@ -294,11 +265,14 @@ public final class Reader {
             case Abbreviation.EnterSubBlock.id:
                 let blockID = try castToUInt32(readVBR(width: 8))
                 let abbrevLen = try castToUInt8(readVBR(width: 4))
+                guard abbrevLen > 0 else {
+                    throw error("zero abbrevLen")
+                }
                 skipToAlignment(32)
                 let lengthInWord = try castToUInt32(try readFixed(width: 32))
                 let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
                 if ovf {
-                    throw error(.invalidLengthValue(lengthInWord))
+                    throw error("invalid length value: \(lengthInWord)")
                 }
                 let block = Block(id: blockID,
                                   abbrevIDWidth: abbrevLen,
@@ -306,70 +280,48 @@ public final class Reader {
                 return .enterSubBlock(block)
             case DefineAbbrev.id:
                 let opsNum = try castToUInt32(readVBR(width: 5))
-                var operands: [DefineAbbrev.Operand] = []
-                
-                func decodeOperand() throws -> DefineAbbrev.Operand {
-                    let isLiteral = try castToUInt8(readFixed(width: 1)) != 0
-                    if isLiteral {
-                        let value = try castToUInt64(readVBR(width: 8))
-                        return DefineAbbrev.Operand.literal(value: value)
-                    }
-                    
-                    let encoding = try castToUInt8(readFixed(width: 3))
-                    switch encoding {
-                    case DefineAbbrev.Fixed.code:
-                        let width = try castToUInt8(readVBR(width: 5))
-                        return .fixed(width: width)
-                    case DefineAbbrev.VBR.code:
-                        let width = try castToUInt8(readVBR(width: 5))
-                        return .vbr(width: width)
-                    case DefineAbbrev.Array.code:
-                        let type = try decodeOperand()
-                        return .array(type: type)
-                    case DefineAbbrev.Char6.code:
-                        return .char6
-                    case DefineAbbrev.Blob.code:
-                        guard operands.count + 1 == opsNum else {
-                            throw error(.blobMustBeLast)
-                        }
-                        return .blob
-                    default:
-                        throw error(.unknownDefineAbbrevOperandCode(encoding))
-                    }
+                guard opsNum >= 1 else {
+                    throw error("no operand for DEFINE_ABBREV")
                 }
-                
+                var operands: [DefineAbbrev.Operand] = []
                 while operands.count < opsNum {
-                    let op = try decodeOperand()
+                    let op = try readDefineOperand()
                     operands.append(op)
                 }
-                
                 let defAbb = DefineAbbrev(operands: operands)
                 return .defineAbbrev(defAbb)
             case Abbreviation.UnabbrevRecord.id:
                 let code = try castToUInt32(readVBR(width: 6))
                 let opsNum = try castToUInt32(readVBR(width: 6))
-                var operands: [UInt64] = []
+                var values: [Record.Value] = []
                 for _ in 0..<opsNum {
                     let op = try castToUInt64(readVBR(width: 6))
-                    operands.append(op)
+                    values.append(.value(op))
                 }
-                let record = Record(code: code, operands: operands)
+                let record = Record(code: code, values: values)
                 return .unabbrevRecord(record)
             default:
-                guard let define = state.blockInfo.abbrevDefinition(for: abbrevID) else {
-                    throw error(.unknownAbbrevID(abbrevID),
+                guard let define = state.abbrevDefinitions.get(for: abbrevID) else {
+                    throw error("unknown abbrev id: \(abbrevID)",
                                 position: abbPos)
                 }
-                for operand in define.operands {
-                    switch operand {
-                    case .literal(value: let literalValue):
-                        
-                        
-                        
-                    default:
-                        fatalError("TODO")
-                    }
+                var operands = define.operands
+                guard operands.count >= 1 else {
+                    throw error("no operand")
                 }
+                let value0 = try readValue(for: operands[0])
+                guard case .value(let codeValue) = value0 else {
+                    throw error("code is not primitive: \(value0.kind)")
+                }
+                let code: UInt32 = try castToUInt32(codeValue)
+                operands.removeFirst()
+                var values: [Record.Value] = []
+                for op in operands {
+                    let v = try readValue(for: op)
+                    values.append(v)
+                }
+                let record = Record(code: code, values: values)
+                return .definedRecord(record, abbrevID: abbrevID)
             }
         }
     }
@@ -380,14 +332,17 @@ public final class Reader {
             
             switch abb {
             case .enterSubBlock(let subBlock):
-                enter(block: subBlock)
+                try enter(block: subBlock)
                 try readBlock()
-                exitBlock()
+                try exitBlock()
             case .endBlock:
                 return
             case .defineAbbrev(let defAbb):
-                state.blockInfo.defineAbbrev(defAbb)
+                state.abbrevDefinitions.add(defAbb)
             case .unabbrevRecord(let record):
+                dump(record)
+            case .definedRecord(let record, abbrevID: let abbID):
+                print(abbID)
                 dump(record)
             }
         }
@@ -398,7 +353,7 @@ public final class Reader {
         
         func modifyBlockInfo(_ f: (inout BlockInfo) -> Void) throws {
             guard let id = targetBlockID else {
-                throw error(.blockIDNotSpecified)
+                throw error("block id is not specified")
             }
             self.modifyRootBlockInfo(id: id, f)
         }
@@ -408,42 +363,45 @@ public final class Reader {
             
             switch abb {
             case .enterSubBlock(let block):
-                emitWarning(.subBlockInBlockInfoIgnored)
+                emitWarning("ENTER_SUBBLOCK in BLOCKINFO is ignored")
                 advancePosition(length: castToUInt64(block.length))
             case .endBlock:
                 return
             case .defineAbbrev(let defAbb):
                 try modifyBlockInfo { (info) in
-                    info.defineAbbrev(defAbb)
+                    info.abbrevDefinitions.add(defAbb)
                 }
+            case .definedRecord(let record, abbrevID: _):
+                emitWarning("Record(\(record.code)) in BLOCKINFO is ignored")
             case .unabbrevRecord(let record):
                 do {
+                    let values = try record.values.map { try castToPrimitive($0) }
                     switch record.code {
                     case Block.BlockInfo.SetBID.id:
-                        if record.operands.count <= 0 {
-                            throw error(.invalidRecordOperand)
+                        if values.count <= 0 {
+                            throw error("invalid operand for SET_BID")
                         }
-                        targetBlockID = try castToUInt32(record.operands[0])
+                        targetBlockID = try castToUInt32(values[0])
                     case Block.BlockInfo.BlockName.id:
-                        let name = try decodeOperandsString(record.operands)
+                        let name = try decodePrimitivesString(values)
                         try modifyBlockInfo { (info) in
                             info.name = name
                         }
                     case Block.BlockInfo.SetRecordName.id:
-                        var operands = record.operands
-                        if operands.count <= 0 {
-                            throw error(.invalidRecordOperand)
+                        var values = values
+                        if values.count <= 0 {
+                            throw error("invalid operand for SET_RECORD_NAME")
                         }
-                        let recordID = try castToUInt32(operands[0])
-                        operands.removeFirst()
-                        let name = try decodeOperandsString(operands)
+                        let recordID = try castToUInt32(values[0])
+                        values.removeFirst()
+                        let name = try decodePrimitivesString(values)
                         try modifyBlockInfo { (info) in
                             info.modifyRecordInfo(id: recordID) { (info) in
                                 info.name = name
                             }
                         }
                     default:
-                        throw error(.unknownRecordCode(code: record.code))
+                        throw error("unknown record code: \(record.code)")
                     }
                 } catch {
                     switch error {
@@ -457,15 +415,90 @@ public final class Reader {
         }
     }
     
-    private func decodeOperandsString(_ operands: [UInt64]) throws -> String {
+    private func readValue(for operand: DefineAbbrev.Operand) throws -> Record.Value {
+        switch operand {
+        case .literal(value: let value):
+            return .value(value)
+        case .fixed(width: let width):
+            let value = try castToUInt64(readFixed(width: castToInt(width)))
+            return .value(value)
+        case .vbr(width: let width):
+            let value = try castToUInt64(readVBR(width: castToInt(width)))
+            return .value(value)
+        case .char6:
+            let value = try readChar6()
+            return .value(castToUInt64(value))
+        case .array(type: let type):
+            let count = try castToInt(readVBR(width: 6))
+            var array: [Record.Value] = []
+            for _ in 0..<count {
+                let item = try readValue(for: type)
+                array.append(item)
+            }
+            return .array(array)
+        case .blob:
+            let size = try castToInt(readVBR(width: 6))
+            skipToAlignment(32)
+            let data = try readBlobData(size: size)
+            skipToAlignment(32)
+            return .blob(data)
+        }
+    }
+    
+    private func readDefineOperand() throws -> DefineAbbrev.Operand {
+        let isLiteral = try castToUInt8(readFixed(width: 1)) != 0
+        if isLiteral {
+            let value = try castToUInt64(readVBR(width: 8))
+            return DefineAbbrev.Operand.literal(value: value)
+        }
+        
+        let encoding = try castToUInt8(readFixed(width: 3))
+        switch encoding {
+        case DefineAbbrev.Fixed.code:
+            let width = try castToUInt8(readVBR(width: 5))
+            return .fixed(width: width)
+        case DefineAbbrev.VBR.code:
+            let width = try castToUInt8(readVBR(width: 5))
+            return .vbr(width: width)
+        case DefineAbbrev.Array.code:
+            let type = try readDefineOperand()
+            return .array(type: type)
+        case DefineAbbrev.Char6.code:
+            return .char6
+        case DefineAbbrev.Blob.code:
+            return .blob
+        default:
+            throw error("unknown operand code: \(encoding)")
+        }
+    }
+    
+    private func decodePrimitivesString(_ operands: [UInt64]) throws -> String {
         var data = Data()
         for o in operands {
             data.append(try castToUInt8(o))
         }
         guard let string = String(data: data, encoding: .utf8) else {
-            throw error(.utf8DecodeFailed)
+            throw error("UTF-8 decode failed")
         }
         return string
+    }
+    
+    private static let char6Table: [UInt8] = {
+        let str: String = [
+            "abcdefghijklmnopqrstuvwxyz",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "._"
+            ].joined()
+        let chars: [Character] = str.map { $0 }
+        return chars.map { $0.asciiValue! }
+    }()
+    
+    private func readChar6() throws -> UInt8 {
+        let value = try castToUInt8(readFixed(width: 6))
+        guard value < 64 else {
+            throw error("invalid char6: \(value)")
+        }
+        return Reader.char6Table[castToInt(value)]
     }
     
     public func readFixed(width: Int) throws -> BigUInt {
@@ -494,7 +527,12 @@ public final class Reader {
         return result
     }
     
-    public func skipToAlignment(_ alignment: Int) {
+    private func readBlobData(size: Int) throws -> Data {
+        precondition(position.bitOffset == 0)
+        return try _readData(position: position.offset, size: size)
+    }
+    
+    private func skipToAlignment(_ alignment: Int) {
         let bitPosition = position.offset * 8 + UInt64(position.bitOffset)
         let rem = Int(bitPosition % UInt64(alignment))
         if rem == 0 {
@@ -505,7 +543,7 @@ public final class Reader {
 
     private func readBits(length: Int) throws -> BitBuffer {
         precondition(length > 0)
-        let bitOffset = Int(position.bitOffset)
+        let bitOffset = castToInt(position.bitOffset)
         let readSize = (bitOffset + length - 1) / 8 + 1
         let data = try _readData(position: position.offset, size: readSize)
         let bits = BitBuffer(data: data, bitOffset: bitOffset, bitLength: length)
@@ -534,27 +572,38 @@ public final class Reader {
     
     private func _readData(position _pos: UInt64, size: Int) throws -> Data {
         guard let position = Int(exactly: _pos) else {
-            throw error(.invalidFilePosition(_pos))
+            throw error("invalid file position: \(_pos)")
         }
         
         if position + size > data.count {
-            throw error(.reachedEndOfFile)
+            throw error("reached at end of file")
         }
         
-        return data.subdata(in: position..<(position + size))
+        let s = data.startIndex + position
+        return data[s..<(s + size)]
     }
     
     private func castToUInt8(_ a: UInt64) throws -> UInt8 { return try intCast(a) }
     private func castToUInt8(_ a: BigUInt) throws -> UInt8 { return try intCast(a) }
     private func castToUInt32(_ a: UInt64) throws -> UInt32 { return try intCast(a) }
     private func castToUInt32(_ a: BigUInt) throws -> UInt32 { return try intCast(a) }
+    private func castToUInt64(_ a: UInt8) -> UInt64 { return UInt64(a) }
     private func castToUInt64(_ a: UInt32) -> UInt64 { return UInt64(a) }
     private func castToUInt64(_ a: BigUInt) throws -> UInt64 { return try intCast(a) }
     private func castToInt(_ a: UInt8) -> Int { return Int(a) }
+    private func castToInt(_ a: UInt32) throws -> Int { return try intCast(a) }
+    private func castToInt(_ a: BigUInt) throws -> Int { return try intCast(a) }
     
     private func intCast<A, R>(_ a: A) throws -> R where A : BinaryInteger, R : BinaryInteger {
         guard let x = R(exactly: a) else {
-            throw error(.primitiveOutOfRange(BigUInt(a)), position: position)
+            throw error("primitive is out of range: \(a)")
+        }
+        return x
+    }
+    
+    private func castToPrimitive(_ a: Record.Value) throws -> UInt64 {
+        guard case .value(let x) = a else {
+            throw error("value is not primitive: \(a.kind)")
         }
         return x
     }
