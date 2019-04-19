@@ -41,62 +41,9 @@ public final class Reader {
         }
     }
     
-    public struct AbbrevDefinitions {
-        public var items: [(UInt32, DefineAbbrev)]
-        public init() {
-            self.items = []
-        }
-        
-        public var nextID: UInt32 {
-            return items.map { $0.0 }.max().map { $0 + 1 } ?? 4
-        }
-        
-        public func get(for id: UInt32) -> DefineAbbrev? {
-            return items.first { $0.0 == id }.map { $0.1 }
-        }
-        
-        public mutating func add(_ define: DefineAbbrev) {
-            let id = nextID
-            items.append((id, define))
-        }
-    }
-    
-    public struct BlockInfo {
-        public struct RecordInfo {
-            public var name: String?
-            public init(name: String? = nil)
-            {
-                self.name = name
-            }
-        }
-        
-        public var name: String?
-        public var recordInfos: [UInt32: RecordInfo]
-        public var abbrevDefinitions: AbbrevDefinitions
-        
-        public init(name: String? = nil,
-                    recordInfos: [UInt32: RecordInfo] = [:],
-                    abbrevDefinitions: AbbrevDefinitions = AbbrevDefinitions())
-        {
-            self.name = name
-            self.recordInfos = recordInfos
-            self.abbrevDefinitions = abbrevDefinitions
-        }
-        
-        public func recordInfo(id: UInt32) -> RecordInfo {
-            return recordInfos[id] ?? RecordInfo()
-        }
-        
-        public mutating func setRecordInfo(_ info: RecordInfo, id: UInt32) {
-            recordInfos[id] = info
-        }
-        
-        public mutating func modifyRecordInfo(id: UInt32, _ f: (inout RecordInfo) -> Void) {
-            var info = recordInfo(id: id)
-            f(&info)
-            setRecordInfo(info, id: id)
-        }
-    }
+    public typealias AbbrevDefinitions = Document.AbbrevDefinitions
+    public typealias RecordInfo = Document.RecordInfo
+    public typealias BlockInfo = Document.BlockInfo
     
     public struct State {
         public var block: Block?
@@ -125,26 +72,22 @@ public final class Reader {
     }
     private var stateStack: [State]
     
-    private var blockInfos: [UInt32: BlockInfo]
+    private var currentBlock: Block? {
+        get {
+            return state.block
+        }
+        set {
+            state.block = newValue
+        }
+    }
     
-    private func rootBlockInfo(id: UInt32) -> BlockInfo {
-        return blockInfos[id] ?? BlockInfo()
-    }
-    private func setRootBlockInfo(_ info: BlockInfo, id: UInt32) {
-        blockInfos[id] = info
-    }
-    private func modifyRootBlockInfo(id: UInt32, _ f: (inout BlockInfo) -> Void) {
-        var info = rootBlockInfo(id: id)
-        f(&info)
-        setRootBlockInfo(info, id: id)
-    }
+    private var document: Document!
     
     public init(data: Data) {
         self.data = data
         self.position = Position(offset: 0, bitOffset: 0)
         let state = State(block: nil, enterPosition: 0)
         self.stateStack = [state]
-        self.blockInfos = [:]
     }
     
     public convenience init(file: URL) throws {
@@ -157,11 +100,11 @@ public final class Reader {
             throw error("invalid enter block position")
         }
 
-        let name = traceName(ofBlockWithID: block.id)
+        let name = document.debugBlockName(id: block.id)
         trace("enter \(name) {")
-        let blockInfo = rootBlockInfo(id: block.id)
+        let blockInfo = document.blockInfos.items[block.id]
         let state = State(block: block,
-                          abbrevDefinitions: blockInfo.abbrevDefinitions,
+                          abbrevDefinitions: blockInfo?.abbrevDefinitions ?? AbbrevDefinitions(),
                           enterPosition: self.position.offset)
         pushState(state)
     }
@@ -170,11 +113,11 @@ public final class Reader {
         stateStack.append(state)
     }
 
-    private func exitBlock() throws {
+    private func exitBlock() throws -> Block {
         precondition(stateStack.count >= 2)
         let state = self.state
         let block = state.block!
-        let name = traceName(ofBlockWithID: block.id)
+        let name = document.debugBlockName(id: block.id)
         stateStack.removeLast()
         trace("} exit \(name)")
         
@@ -185,14 +128,14 @@ public final class Reader {
         guard state.enterPosition + castToUInt64(block.length) == self.position.offset else {
             throw error("invalid exit block position, enter=\(state.enterPosition), length=\(block.length)")
         }
+        
+        return block
     }
-    
-    private var blockID: UInt32? {
-        return state.block?.id
-    }
-    
-    public func read() throws {
-        let magic = try readMagicNumber()
+
+    public func read() throws -> Document {
+        let magicNumber = try readMagicNumber()
+        
+        self.document = Document(magicNumber: magicNumber)
         
         while !isEnd {
             let abb = try readAbbreviation()
@@ -201,11 +144,13 @@ public final class Reader {
                 if block.id == Block.BlockInfo.id {
                     try enter(block: block)
                     try readBlockInfo()
-                    try exitBlock()
+                    let block = try exitBlock()
+                    document.blocks.append(block)
                 } else {
                     try enter(block: block)
                     try readBlock()
-                    try exitBlock()
+                    let block = try exitBlock()
+                    document.blocks.append(block)
                 }
             case .endBlock:
                 emitWarning("END_BLOCK on top level is ignored")
@@ -213,22 +158,12 @@ public final class Reader {
                 emitWarning("DEFINE_ABBREV on top level is ignored")
             case .unabbrevRecord:
                 emitWarning("UNABBREV_RECORD on top level is ignored")
-            case .definedRecord(let record, abbrevID: let abbID):
+            case .definedRecord(let record):
                 emitWarning("record(\(record.code)) on top level is ignored")
             }
         }
-    }
-
-    private func name(ofBlockWithID id: UInt32) -> String {
-        if id == 0 {
-            return "BLOCKINFO"
-        }
-        let info = rootBlockInfo(id: id)
-        return info.name ?? ""
-    }
-    
-    private func traceName(ofBlockWithID id: UInt32) -> String {
-        return name(ofBlockWithID: id) + "#\(id)"
+        
+        return document
     }
     
     private func emitWarning(_ message: String) {
@@ -241,8 +176,7 @@ public final class Reader {
     
     private func error(_ message: String,
                        position: Position? = nil) -> Error {
-        let blockID = self.blockID
-        let blockName = blockID.map { traceName(ofBlockWithID: $0) }
+        let blockName = currentBlock.map { document.debugBlockName(id: $0.id) }
         return Error(message: message,
                      position: position ?? self.position,
                      blockName: blockName)
@@ -256,7 +190,7 @@ public final class Reader {
     private func readAbbreviation() throws -> Abbreviation {
         while true {
             let abbPos = self.position
-            let abbLen = castToInt(state.block?.abbrevIDWidth ?? 2)
+            let abbLen = castToInt(currentBlock?.abbrevIDWidth ?? 2)
             let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
             switch abbrevID {
             case Abbreviation.EndBlock.id:
@@ -274,7 +208,8 @@ public final class Reader {
                 if ovf {
                     throw error("invalid length value: \(lengthInWord)")
                 }
-                let block = Block(id: blockID,
+                let block = Block(document: document,
+                                  id: blockID,
                                   abbrevIDWidth: abbrevLen,
                                   length: length)
                 return .enterSubBlock(block)
@@ -307,7 +242,8 @@ public final class Reader {
                     let op = try castToUInt64(readVBR(width: 6))
                     values.append(.value(op))
                 }
-                let record = Record(code: code, values: values)
+                let record = Record(block: currentBlock,
+                                    abbrevID: abbrevID, code: code, values: values)
                 return .unabbrevRecord(record)
             default:
                 guard let define = state.abbrevDefinitions.get(for: abbrevID) else {
@@ -329,8 +265,9 @@ public final class Reader {
                     let v = try readValue(for: op)
                     values.append(v)
                 }
-                let record = Record(code: code, values: values)
-                return .definedRecord(record, abbrevID: abbrevID)
+                let record = Record(block: currentBlock,
+                                    abbrevID: abbrevID, code: code, values: values)
+                return .definedRecord(record)
             }
         }
     }
@@ -343,17 +280,17 @@ public final class Reader {
             case .enterSubBlock(let subBlock):
                 try enter(block: subBlock)
                 try readBlock()
-                try exitBlock()
+                let subBlock = try exitBlock()
+                currentBlock!.blocks.append(subBlock)
             case .endBlock:
                 return
             case .defineAbbrev(let defAbb):
                 state.abbrevDefinitions.add(defAbb)
             case .unabbrevRecord(let record):
+                currentBlock!.records.append(record)
                 break
-//                dump(record)
-            case .definedRecord(let record, abbrevID: let abbID):
-//                print(abbID)
-//                dump(record)
+            case .definedRecord(let record):
+                currentBlock!.records.append(record)
                 break
             }
         }
@@ -366,7 +303,7 @@ public final class Reader {
             guard let id = targetBlockID else {
                 throw error("block id is not specified")
             }
-            self.modifyRootBlockInfo(id: id, f)
+            f(&document.blockInfos.items[id, default: BlockInfo()])
         }
         
         while true {
@@ -382,7 +319,7 @@ public final class Reader {
                 try modifyBlockInfo { (info) in
                     info.abbrevDefinitions.add(defAbb)
                 }
-            case .definedRecord(let record, abbrevID: _):
+            case .definedRecord(let record):
                 emitWarning("Record(\(record.code)) in BLOCKINFO is ignored")
             case .unabbrevRecord(let record):
                 do {
@@ -407,7 +344,7 @@ public final class Reader {
                         values.removeFirst()
                         let name = try decodePrimitivesString(values)
                         try modifyBlockInfo { (info) in
-                            info.modifyRecordInfo(id: recordID) { (info) in
+                            info.recordInfos.items[recordID, default: RecordInfo()].modify { (info) in
                                 info.name = name
                             }
                         }

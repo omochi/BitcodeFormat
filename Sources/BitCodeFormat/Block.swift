@@ -1,7 +1,7 @@
 import Foundation
 import BigInt
 
-public struct Block {
+public final class Block {
     public enum BlockInfo {
         public static let id: UInt32 = 0
         
@@ -16,7 +16,23 @@ public struct Block {
         }
     }
     
+    public weak var document: Document?
     public var id: UInt32
     public var abbrevIDWidth: UInt8
     public var length: UInt32
+    public var records: [Record]
+    public var blocks: [Block]
+    
+    public init(document: Document?,
+                id: UInt32,
+                abbrevIDWidth: UInt8,
+                length: UInt32)
+    {
+        self.document = document
+        self.id = id
+        self.abbrevIDWidth = abbrevIDWidth
+        self.length = length
+        self.records = []
+        self.blocks = []
+    }
 }

@@ -15,5 +15,5 @@ public enum Abbreviation {
     case enterSubBlock(Block)
     case defineAbbrev(DefineAbbrev)
     case unabbrevRecord(Record)
-    case definedRecord(Record, abbrevID: UInt32)
+    case definedRecord(Record)
 }
