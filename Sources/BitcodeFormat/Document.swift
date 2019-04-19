@@ -1,6 +1,6 @@
 import Foundation
 
-public final class Document {
+public final class Document : CopyInitializable {
     public struct AbbrevDefinitions {
         public var items: [(UInt32, DefineAbbrev)]
         public init() {
@@ -71,5 +71,11 @@ public final class Document {
         self.magicNumber = magicNumber
         self.blockInfos = blockInfos
         self.blocks = blocks
+    }
+    
+    public convenience init(file: URL) throws {
+        let reader = try Reader(file: file)
+        let doc = try reader.read()
+        self.init(copy: doc)
     }
 }
