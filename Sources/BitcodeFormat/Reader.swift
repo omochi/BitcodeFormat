@@ -32,11 +32,16 @@ public final class Reader {
         public var offset: UInt64
         public var bitOffset: UInt8
         
-        public init(offset: UInt64,
-                    bitOffset: UInt8)
+        public init(offset: UInt64 = 0,
+                    bitOffset: UInt8 = 0)
         {
             self.offset = offset
             self.bitOffset = bitOffset
+        }
+        
+        public init(bitOffset: UInt64) {
+            self.init(offset: bitOffset / 8,
+                      bitOffset: UInt8(bitOffset % 8))
         }
         
         public var description: String {
@@ -67,7 +72,7 @@ public final class Reader {
         }
     }
     
-    private var position: Position
+    public var position: Position
     private var state: State {
         get {
             return stateStack.last!
@@ -93,7 +98,7 @@ public final class Reader {
     public convenience init(data: Data) {
         self.init(document: Document(data: data,
                                      magicNumber: 0),
-                  position: Position(offset: 0, bitOffset: 0))
+                  position: Position())
     }
     
     public convenience init(file: URL) throws {
@@ -101,19 +106,18 @@ public final class Reader {
         self.init(data: data)
     }
     
-    public convenience init(blockInfos: Document.BlockInfos,
-                            block: Block,
-                            position: Position) throws
+    public convenience init(block: Block) throws
     {
         guard let doc = block.document else {
             throw Error(message: "no document",
-                        position: position,
+                        position: Position(),
                         blockName: nil)
         }
         self.init(document: doc,
-                  position: Position(offset: 0, bitOffset: 0))
+                  position: Position())
+        self.position = block.position
         try enter(block: block)
-        self.position = position
+        try readBlock(onlyDefines: true)
     }
     
     private init(document: Document,
@@ -176,7 +180,7 @@ public final class Reader {
                     document.blocks.append(block)
                 } else {
                     try enter(block: block)
-                    try readBlock()
+                    try readBlock(onlyDefines: false)
                     let block = try exitBlock()
                     document.blocks.append(block)
                 }
@@ -239,6 +243,7 @@ public final class Reader {
                               parent: currentBlock,
                               id: blockID,
                               abbrevIDWidth: abbrevLen,
+                              position: self.position,
                               length: length)
             return .enterSubBlock(block)
         case DefineAbbrev.id:
@@ -299,14 +304,15 @@ public final class Reader {
         }
     }
     
-    private func readBlock() throws {
+    public func readBlock(onlyDefines: Bool) throws {
         while true {
             let abb = try readAbbreviation()
             
             switch abb {
             case .enterSubBlock(let subBlock):
+                if onlyDefines { break }
                 try enter(block: subBlock)
-                try readBlock()
+                try readBlock(onlyDefines: false)
                 let subBlock = try exitBlock()
                 currentBlock!.blocks.append(subBlock)
             case .endBlock:
@@ -314,10 +320,12 @@ public final class Reader {
             case .defineAbbrev(let defAbb):
                 state.abbrevDefinitions.add(defAbb)
             case .unabbrevRecord(let record):
+                if onlyDefines { break }
                 trace("\(record.name)")
                 currentBlock!.records.append(record)
                 break
             case .definedRecord(let record):
+                if onlyDefines { break }
                 trace("\(record.name)")
                 currentBlock!.records.append(record)
                 break

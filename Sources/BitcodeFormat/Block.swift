@@ -20,6 +20,7 @@ public final class Block {
     public weak var parent: Block?
     public var id: UInt32
     public var abbrevIDWidth: UInt8
+    public var position: Reader.Position
     public var length: Int
     public var records: [Record]
     public var blocks: [Block]
@@ -29,12 +30,14 @@ public final class Block {
                 parent: Block?,
                 id: UInt32,
                 abbrevIDWidth: UInt8,
+                position: Reader.Position,
                 length: Int)
     {
         self.document = document
         self.parent = parent
         self.id = id
         self.abbrevIDWidth = abbrevIDWidth
+        self.position = position
         self.length = length
         self.records = []
         self.blocks = []
