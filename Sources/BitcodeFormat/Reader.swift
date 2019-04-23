@@ -32,6 +32,13 @@ public final class Reader {
         public var offset: UInt64
         public var bitOffset: UInt8
         
+        public init(offset: UInt64,
+                    bitOffset: UInt8)
+        {
+            self.offset = offset
+            self.bitOffset = bitOffset
+        }
+        
         public var description: String {
             var str = "\(offset)"
             if bitOffset != 0 {
@@ -60,7 +67,6 @@ public final class Reader {
         }
     }
     
-    private let data: Data
     private var position: Position
     private var state: State {
         get {
@@ -81,13 +87,13 @@ public final class Reader {
         }
     }
     
-    private var document: Document!
+    public var isTraceEnabled: Bool = false
+    private let document: Document
     
-    public init(data: Data) {
-        self.data = data
-        self.position = Position(offset: 0, bitOffset: 0)
-        let state = State(block: nil, enterPosition: 0)
-        self.stateStack = [state]
+    public convenience init(data: Data) {
+        self.init(document: Document(data: data,
+                                     magicNumber: 0),
+                  position: Position(offset: 0, bitOffset: 0))
     }
     
     public convenience init(file: URL) throws {
@@ -95,7 +101,31 @@ public final class Reader {
         self.init(data: data)
     }
     
-    private func enter(block: Block) throws {
+    public convenience init(blockInfos: Document.BlockInfos,
+                            block: Block,
+                            position: Position) throws
+    {
+        guard let doc = block.document else {
+            throw Error(message: "no document",
+                        position: position,
+                        blockName: nil)
+        }
+        self.init(document: doc,
+                  position: Position(offset: 0, bitOffset: 0))
+        try enter(block: block)
+        self.position = position
+    }
+    
+    private init(document: Document,
+                 position: Position)
+    {
+        self.document = document
+        self.position = position
+        let state = State(block: nil, enterPosition: 0)
+        self.stateStack = [state]
+    }
+    
+    public func enter(block: Block) throws {
         guard position.bitOffset == 0 else {
             throw error("invalid enter block position")
         }
@@ -112,7 +142,7 @@ public final class Reader {
         stateStack.append(state)
     }
 
-    private func exitBlock() throws -> Block {
+    public func exitBlock() throws -> Block {
         precondition(stateStack.count >= 2)
         let state = self.state
         let block = state.block!
@@ -123,7 +153,7 @@ public final class Reader {
             throw error("invalid exit block position")
         }
         
-        guard state.enterPosition + castToUInt64(block.length) == self.position.offset else {
+        guard try state.enterPosition + castToUInt64(block.length) == self.position.offset else {
             throw error("invalid exit block position, enter=\(state.enterPosition), length=\(block.length)")
         }
         
@@ -133,7 +163,7 @@ public final class Reader {
     public func read() throws -> Document {
         let magicNumber = try readMagicNumber()
         
-        self.document = Document(magicNumber: magicNumber)
+        document.magicNumber = magicNumber
         
         while !isEnd {
             let abb = try readAbbreviation()
@@ -185,88 +215,87 @@ public final class Reader {
         return try castToUInt32(bs.asBigUInt)
     }
     
-    private func readAbbreviation() throws -> Abbreviation {
-        while true {
-            let abbPos = self.position
-            let abbLen = castToInt(currentBlock?.abbrevIDWidth ?? 2)
-            let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
-            switch abbrevID {
-            case Abbreviation.EndBlock.id:
-                skipToAlignment(32)
-                return .endBlock
-            case Abbreviation.EnterSubBlock.id:
-                let blockID = try castToUInt32(readVBR(width: 8))
-                let abbrevLen = try castToUInt8(readVBR(width: 4))
-                guard abbrevLen > 0 else {
-                    throw error("zero abbrevLen")
-                }
-                skipToAlignment(32)
-                let lengthInWord = try castToUInt32(try readFixed(width: 32))
-                let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
-                if ovf {
-                    throw error("invalid length value: \(lengthInWord)")
-                }
-                let block = Block(document: document,
-                                  id: blockID,
-                                  abbrevIDWidth: abbrevLen,
-                                  length: length)
-                return .enterSubBlock(block)
-            case DefineAbbrev.id:
-                let num = try castToUInt32(readVBR(width: 5))
-                guard num >= 1 else {
-                    throw error("no operand for DEFINE_ABBREV")
-                }
-                let numInt = try castToInt(num)
-                
-                var operands: [DefineAbbrev.Operand] = []
-                var count: Int = 0
-                while true {
-                    let op = try readDefineOperand(count: &count)
-                    operands.append(op)
-                    if count > numInt {
-                        throw error("DEFINE_ABBREV operand count overflow")
-                    }
-                    if count == numInt {
-                        break
-                    }
-                }
-                let defAbb = DefineAbbrev(operands: operands)
-                return .defineAbbrev(defAbb)
-            case Abbreviation.UnabbrevRecord.id:
-                let code = try castToUInt32(readVBR(width: 6))
-                let opsNum = try castToUInt32(readVBR(width: 6))
-                var values: [Record.Value] = []
-                for _ in 0..<opsNum {
-                    let op = try castToUInt64(readVBR(width: 6))
-                    values.append(.value(op))
-                }
-                let record = Record(block: currentBlock,
-                                    abbrevID: abbrevID, code: code, values: values)
-                return .unabbrevRecord(record)
-            default:
-                guard let define = state.abbrevDefinitions.get(for: abbrevID) else {
-                    throw error("unknown abbrev id: \(abbrevID)",
-                                position: abbPos)
-                }
-                var operands = define.operands
-                guard operands.count >= 1 else {
-                    throw error("no operand")
-                }
-                let value0 = try readValue(for: operands[0])
-                guard case .value(let codeValue) = value0 else {
-                    throw error("code is not primitive: \(value0.kind)")
-                }
-                let code: UInt32 = try castToUInt32(codeValue)
-                operands.removeFirst()
-                var values: [Record.Value] = []
-                for op in operands {
-                    let v = try readValue(for: op)
-                    values.append(v)
-                }
-                let record = Record(block: currentBlock,
-                                    abbrevID: abbrevID, code: code, values: values)
-                return .definedRecord(record)
+    public func readAbbreviation() throws -> Abbreviation {
+        let abbPos = self.position
+        let abbLen = castToInt(currentBlock?.abbrevIDWidth ?? 2)
+        let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
+        switch abbrevID {
+        case Abbreviation.EndBlock.id:
+            skipToAlignment(32)
+            return .endBlock
+        case Abbreviation.EnterSubBlock.id:
+            let blockID = try castToUInt32(readVBR(width: 8))
+            let abbrevLen = try castToUInt8(readVBR(width: 4))
+            guard abbrevLen > 0 else {
+                throw error("zero abbrevLen")
             }
+            skipToAlignment(32)
+            let lengthInWord = try castToInt(try readFixed(width: 32))
+            let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
+            if ovf {
+                throw error("invalid length value: \(lengthInWord)")
+            }
+            let block = Block(document: document,
+                              parent: currentBlock,
+                              id: blockID,
+                              abbrevIDWidth: abbrevLen,
+                              length: length)
+            return .enterSubBlock(block)
+        case DefineAbbrev.id:
+            let num = try castToUInt32(readVBR(width: 5))
+            guard num >= 1 else {
+                throw error("no operand for DEFINE_ABBREV")
+            }
+            let numInt = try castToInt(num)
+            
+            var operands: [DefineAbbrev.Operand] = []
+            var count: Int = 0
+            while true {
+                let op = try readDefineOperand(count: &count)
+                operands.append(op)
+                if count > numInt {
+                    throw error("DEFINE_ABBREV operand count overflow")
+                }
+                if count == numInt {
+                    break
+                }
+            }
+            let defAbb = DefineAbbrev(operands: operands)
+            return .defineAbbrev(defAbb)
+        case Abbreviation.UnabbrevRecord.id:
+            let code = try castToUInt32(readVBR(width: 6))
+            let opsNum = try castToUInt32(readVBR(width: 6))
+            var values: [Record.Value] = []
+            for _ in 0..<opsNum {
+                let op = try castToUInt64(readVBR(width: 6))
+                values.append(.value(op))
+            }
+            let record = Record(block: currentBlock,
+                                abbrevID: abbrevID, code: code, values: values)
+            return .unabbrevRecord(record)
+        default:
+            guard let define = state.abbrevDefinitions.get(for: abbrevID) else {
+                throw error("unknown abbrev id: \(abbrevID)",
+                    position: abbPos)
+            }
+            var operands = define.operands
+            guard operands.count >= 1 else {
+                throw error("no operand")
+            }
+            let value0 = try readValue(for: operands[0])
+            guard case .value(let codeValue) = value0 else {
+                throw error("code is not primitive: \(value0.case)")
+            }
+            let code: UInt32 = try castToUInt32(codeValue)
+            operands.removeFirst()
+            var values: [Record.Value] = []
+            for op in operands {
+                let v = try readValue(for: op)
+                values.append(v)
+            }
+            let record = Record(block: currentBlock,
+                                abbrevID: abbrevID, code: code, values: values)
+            return .definedRecord(record)
         }
     }
     
@@ -312,7 +341,7 @@ public final class Reader {
             switch abb {
             case .enterSubBlock(let block):
                 emitWarning("ENTER_SUBBLOCK in BLOCKINFO is ignored")
-                advancePosition(lengthInBits: castToUInt64(block.length))
+                advancePosition(lengthInBits: try castToUInt64(block.length))
             case .endBlock:
                 return
             case .defineAbbrev(let defAbb):
@@ -513,26 +542,33 @@ public final class Reader {
     }
     
     private var isEnd: Bool {
-        return position.offset >= UInt64(data.count)
+        return position.offset >= UInt64(document.data.count)
     }
     
     private func trace(_ message: String) {
+        guard isTraceEnabled else {
+            return
+        }
         let indent = String(repeating: "  ", count: stateStack.count - 1)
         let str = indent + message
         print(str)
     }
     
     private func _readData(position _pos: UInt64, size: Int) throws -> Data {
+        let data = document.data
+        
         guard let position = Int(exactly: _pos) else {
             throw error("invalid file position: \(_pos)")
         }
         
-        if position + size > data.count {
+        let low = data.startIndex + position
+        let high = low + size
+        
+        if high > data.endIndex {
             throw error("reached at end of file")
         }
-        
-        let s = data.startIndex + position
-        return data[s..<(s + size)]
+    
+        return data[low..<high]
     }
     
     private func castToUInt8(_ a: UInt64) throws -> UInt8 { return try intCast(a) }
@@ -556,7 +592,7 @@ public final class Reader {
     
     private func castToPrimitive(_ a: Record.Value) throws -> UInt64 {
         guard case .value(let x) = a else {
-            throw error("value is not primitive: \(a.kind)")
+            throw error("value is not primitive: \(a.case)")
         }
         return x
     }

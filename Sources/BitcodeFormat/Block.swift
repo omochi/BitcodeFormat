@@ -17,25 +17,29 @@ public final class Block {
     }
     
     public weak var document: Document?
+    public weak var parent: Block?
     public var id: UInt32
     public var abbrevIDWidth: UInt8
-    public var length: UInt32
+    public var length: Int
     public var records: [Record]
     public var blocks: [Block]
+   
     
     public init(document: Document?,
+                parent: Block?,
                 id: UInt32,
                 abbrevIDWidth: UInt8,
-                length: UInt32)
+                length: Int)
     {
         self.document = document
+        self.parent = parent
         self.id = id
         self.abbrevIDWidth = abbrevIDWidth
         self.length = length
         self.records = []
         self.blocks = []
     }
-    
+
     public var name: String {
         func _name() -> String? {
             if id == 0 {
@@ -49,5 +53,22 @@ public final class Block {
         }
         
         return (_name() ?? "") + "#\(id)"
+    }
+}
+
+extension Block : CustomDebugStringConvertible {
+    public var debugDescription: String {
+        return name
+    }
+}
+
+extension Block : CustomReflectable {
+    public var customMirror: Mirror {
+        return Mirror(self, children: [
+            "abbrevIDWidth": abbrevIDWidth,
+            "length": length,
+            "records": records,
+            "blocks": blocks
+            ])
     }
 }

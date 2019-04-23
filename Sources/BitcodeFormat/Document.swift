@@ -60,14 +60,17 @@ public final class Document : CopyInitializable {
         }
     }
     
+    public var data: Data
     public var magicNumber: UInt32
     public var blockInfos: BlockInfos
     public var blocks: [Block]
     
-    public init(magicNumber: UInt32,
+    public init(data: Data,
+                magicNumber: UInt32,
                 blockInfos: BlockInfos = BlockInfos(),
                 blocks: [Block] = [])
     {
+        self.data = data
         self.magicNumber = magicNumber
         self.blockInfos = blockInfos
         self.blocks = blocks

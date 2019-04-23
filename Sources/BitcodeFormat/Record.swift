@@ -2,7 +2,7 @@ import Foundation
 
 public final class Record {
     public indirect enum Value {
-        public enum Kind : String {
+        public enum Case : String {
             case value
             case array
             case blob
@@ -12,12 +12,33 @@ public final class Record {
         case array([Value])
         case blob(Data)
         
-        public var kind: Kind {
+        public var `case`: Case {
             switch self {
             case .value: return .value
             case .array: return .array
             case .blob: return .blob
             }
+        }
+        
+        public var value: UInt64? {
+            guard case .value(let x) = self else {
+                return nil
+            }
+            return x
+        }
+        
+        public var array: [Value]? {
+            guard case .array(let a) = self else {
+                return nil
+            }
+            return a
+        }
+        
+        public var blob: Data? {
+            guard case .blob(let data) = self else {
+                return nil
+            }
+            return data
         }
     }
 
@@ -49,5 +70,50 @@ public final class Record {
         }
         
         return (_name() ?? "") + "#\(code)"
+    }
+    
+    public var blob: Data? {
+        guard let last = values.last else {
+            return nil
+        }
+        return last.blob
+    }
+}
+
+extension Record : CustomDebugStringConvertible {
+    public var debugDescription: String {
+        return name
+    }
+}
+
+extension Record : CustomReflectable {
+    public var customMirror: Mirror {
+        return Mirror(self, children: [
+            "abbrevID": abbrevID,
+            "values": values
+            ])
+    }
+}
+
+extension Record.Value : CustomDebugStringConvertible {
+    public var debugDescription: String {
+        switch self {
+        case .value(let x): return "\(x)"
+        case .array(let array): return array.debugDescription
+        case .blob(let data): return "blob \(data.count) bytes"
+        }
+    }
+}
+
+extension Record.Value : CustomReflectable {
+    public var customMirror: Mirror {
+        switch self {
+        case .value:
+            return Mirror(self, children: [])
+        case .array(let array):
+            return Mirror(reflecting: array)
+        case .blob:
+            return Mirror(self, children: [])
+        }
     }
 }
