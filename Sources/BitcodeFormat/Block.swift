@@ -2,17 +2,13 @@ import Foundation
 import BigInt
 
 public final class Block {
-    public enum BlockInfo {
+    public enum BLOCKINFO {
         public static let id: UInt32 = 0
         
-        public enum SetBID {
-            public static let id: UInt32 = 1
-        }
-        public enum BlockName {
-            public static let id: UInt32 = 2
-        }
-        public enum SetRecordName {
-            public static let id: UInt32 = 3
+        public enum Code : UInt32 {
+            case SET_BID = 1
+            case BLOCK_NAME = 2
+            case SET_RECORD_NAME = 3
         }
     }
     
@@ -25,7 +21,6 @@ public final class Block {
     public var records: [Record]
     public var blocks: [Block]
    
-    
     public init(document: Document?,
                 parent: Block?,
                 id: UInt32,

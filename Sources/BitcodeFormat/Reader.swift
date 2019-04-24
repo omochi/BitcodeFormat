@@ -173,7 +173,7 @@ public final class Reader {
             let abb = try readAbbreviation()
             switch abb {
             case .enterSubBlock(let block):
-                if block.id == Block.BlockInfo.id {
+                if block.id == Block.BLOCKINFO.id {
                     try enter(block: block)
                     try readBlockInfo()
                     let block = try exitBlock()
@@ -222,86 +222,93 @@ public final class Reader {
     public func readAbbreviation() throws -> Abbreviation {
         let abbPos = self.position
         let abbLen = castToInt(currentBlock?.abbrevIDWidth ?? 2)
-        let abbrevID = try castToUInt32(readBits(length: abbLen).asBigUInt)
-        switch abbrevID {
-        case Abbreviation.EndBlock.id:
-            skipToAlignment(32)
-            return .endBlock
-        case Abbreviation.EnterSubBlock.id:
-            let blockID = try castToUInt32(readVBR(width: 8))
-            let abbrevLen = try castToUInt8(readVBR(width: 4))
-            guard abbrevLen > 0 else {
-                throw error("zero abbrevLen")
-            }
-            skipToAlignment(32)
-            let lengthInWord = try castToInt(try readFixed(width: 32))
-            let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
-            if ovf {
-                throw error("invalid length value: \(lengthInWord)")
-            }
-            let block = Block(document: document,
-                              parent: currentBlock,
-                              id: blockID,
-                              abbrevIDWidth: abbrevLen,
-                              position: self.position,
-                              length: length)
-            return .enterSubBlock(block)
-        case DefineAbbrev.id:
-            let num = try castToUInt32(readVBR(width: 5))
-            guard num >= 1 else {
-                throw error("no operand for DEFINE_ABBREV")
-            }
-            let numInt = try castToInt(num)
-            
-            var operands: [DefineAbbrev.Operand] = []
-            var count: Int = 0
-            while true {
-                let op = try readDefineOperand(count: &count)
-                operands.append(op)
-                if count > numInt {
-                    throw error("DEFINE_ABBREV operand count overflow")
+        let abbrevIDValue = try castToUInt32(readBits(length: abbLen).asBigUInt)
+        if let abbrevID = Abbreviation.ID(rawValue: abbrevIDValue) {
+            switch abbrevID {
+            case .endBlock:
+                skipToAlignment(32)
+                return .endBlock
+            case .enterSubBlock:
+                let blockID = try castToUInt32(readVBR(width: 8))
+                let abbrevLen = try castToUInt8(readVBR(width: 4))
+                guard abbrevLen > 0 else {
+                    throw error("zero abbrevLen")
                 }
-                if count == numInt {
-                    break
+                skipToAlignment(32)
+                let lengthInWord = try castToInt(try readFixed(width: 32))
+                let (length, ovf) = lengthInWord.multipliedReportingOverflow(by: 4)
+                if ovf {
+                    throw error("invalid length value: \(lengthInWord)")
                 }
+                let block = Block(document: document,
+                                  parent: currentBlock,
+                                  id: blockID,
+                                  abbrevIDWidth: abbrevLen,
+                                  position: self.position,
+                                  length: length)
+                return .enterSubBlock(block)
+            case .defineAbbrev:
+                let num = try castToUInt32(readVBR(width: 5))
+                guard num >= 1 else {
+                    throw error("no operand for DEFINE_ABBREV")
+                }
+                let numInt = try castToInt(num)
+                
+                var operands: [DefineAbbrev.Operand] = []
+                var count: Int = 0
+                while true {
+                    let op = try readDefineOperand(count: &count)
+                    operands.append(op)
+                    if count > numInt {
+                        throw error("DEFINE_ABBREV operand count overflow")
+                    }
+                    if count == numInt {
+                        break
+                    }
+                }
+                let defAbb = DefineAbbrev(operands: operands)
+                return .defineAbbrev(defAbb)
+            case .unabbrevRecord:
+                let code = try castToUInt32(readVBR(width: 6))
+                let opsNum = try castToUInt32(readVBR(width: 6))
+                var values: [Record.Value] = []
+                for _ in 0..<opsNum {
+                    let op = try castToUInt64(readVBR(width: 6))
+                    values.append(.value(op))
+                }
+                let record = Record(block: currentBlock,
+                                    abbrevID: abbrevIDValue,
+                                    code: code,
+                                    values: values)
+                return .unabbrevRecord(record)
+                
             }
-            let defAbb = DefineAbbrev(operands: operands)
-            return .defineAbbrev(defAbb)
-        case Abbreviation.UnabbrevRecord.id:
-            let code = try castToUInt32(readVBR(width: 6))
-            let opsNum = try castToUInt32(readVBR(width: 6))
-            var values: [Record.Value] = []
-            for _ in 0..<opsNum {
-                let op = try castToUInt64(readVBR(width: 6))
-                values.append(.value(op))
-            }
-            let record = Record(block: currentBlock,
-                                abbrevID: abbrevID, code: code, values: values)
-            return .unabbrevRecord(record)
-        default:
-            guard let define = state.abbrevDefinitions.get(for: abbrevID) else {
-                throw error("unknown abbrev id: \(abbrevID)",
-                    position: abbPos)
-            }
-            var operands = define.operands
-            guard operands.count >= 1 else {
-                throw error("no operand")
-            }
-            let value0 = try readValue(for: operands[0])
-            guard case .value(let codeValue) = value0 else {
-                throw error("code is not primitive: \(value0.case)")
-            }
-            let code: UInt32 = try castToUInt32(codeValue)
-            operands.removeFirst()
-            var values: [Record.Value] = []
-            for op in operands {
-                let v = try readValue(for: op)
-                values.append(v)
-            }
-            let record = Record(block: currentBlock,
-                                abbrevID: abbrevID, code: code, values: values)
-            return .definedRecord(record)
         }
+        
+        guard let define = state.abbrevDefinitions.get(for: abbrevIDValue) else {
+            throw error("unknown abbrev id: \(abbrevIDValue)",
+                position: abbPos)
+        }
+        var operands = define.operands
+        guard operands.count >= 1 else {
+            throw error("no operand")
+        }
+        let value0 = try readValue(for: operands[0])
+        guard case .value(let codeValue) = value0 else {
+            throw error("code is not primitive: \(value0.case)")
+        }
+        let code: UInt32 = try castToUInt32(codeValue)
+        operands.removeFirst()
+        var values: [Record.Value] = []
+        for op in operands {
+            let v = try readValue(for: op)
+            values.append(v)
+        }
+        let record = Record(block: currentBlock,
+                            abbrevID: abbrevIDValue,
+                            code: code,
+                            values: values)
+        return .definedRecord(record)
     }
     
     public func readBlock(onlyDefines: Bool) throws {
@@ -361,18 +368,21 @@ public final class Reader {
             case .unabbrevRecord(let record):
                 do {
                     let values = try record.values.map { try castToPrimitive($0) }
-                    switch record.code {
-                    case Block.BlockInfo.SetBID.id:
+                    guard let code = Block.BLOCKINFO.Code(rawValue: record.code) else {
+                         throw error("unknown record code: \(record.code)")
+                    }
+                    switch code {
+                    case .SET_BID:
                         if values.count <= 0 {
                             throw error("invalid operand for SET_BID")
                         }
                         targetBlockID = try castToUInt32(values[0])
-                    case Block.BlockInfo.BlockName.id:
+                    case .BLOCK_NAME:
                         let name = try decodePrimitivesString(values)
                         try modifyBlockInfo { (info) in
                             info.name = name
                         }
-                    case Block.BlockInfo.SetRecordName.id:
+                    case .SET_RECORD_NAME:
                         var values = values
                         if values.count <= 0 {
                             throw error("invalid operand for SET_RECORD_NAME")
@@ -385,8 +395,6 @@ public final class Reader {
                                 info.name = name
                             }
                         }
-                    default:
-                        throw error("unknown record code: \(record.code)")
                     }
                 } catch {
                     switch error {
@@ -439,23 +447,24 @@ public final class Reader {
             return DefineAbbrev.Operand.literal(value: value)
         }
         
-        let encoding = try castToUInt8(readFixed(width: 3))
+        let encodingValue = try castToUInt8(readFixed(width: 3))
+        guard let encoding = DefineAbbrev.Code(rawValue: encodingValue) else {
+            throw error("unknown operand code: \(encodingValue)")
+        }
         switch encoding {
-        case DefineAbbrev.Fixed.code:
+        case .fixed:
             let width = try castToUInt8(readVBR(width: 5))
             return .fixed(width: width)
-        case DefineAbbrev.VBR.code:
+        case .vbr:
             let width = try castToUInt8(readVBR(width: 5))
             return .vbr(width: width)
-        case DefineAbbrev.Array.code:
+        case .array:
             let type = try readDefineOperand(count: &count)
             return .array(type: type)
-        case DefineAbbrev.Char6.code:
+        case .char6:
             return .char6
-        case DefineAbbrev.Blob.code:
+        case .blob:
             return .blob
-        default:
-            throw error("unknown operand code: \(encoding)")
         }
     }
     

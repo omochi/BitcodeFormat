@@ -1,22 +1,12 @@
 import Foundation
 
 public struct DefineAbbrev {
-    public static let id: UInt32 = 2
-    
-    public enum Fixed {
-        public static let code: UInt8 = 1
-    }
-    public enum VBR {
-        public static let code: UInt8 = 2
-    }
-    public enum Array {
-        public static let code: UInt8 = 3
-    }
-    public enum Char6 {
-        public static let code: UInt8 = 4
-    }
-    public enum Blob {
-        public static let code: UInt8 = 5
+    public enum Code : UInt8 {
+        case fixed = 1
+        case vbr = 2
+        case array = 3
+        case char6 = 4
+        case blob = 5
     }
     
     public indirect enum Operand {
