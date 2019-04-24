@@ -72,11 +72,12 @@ public final class Record {
         return (_name() ?? "") + "#\(code)"
     }
     
+    public var array: [Value]? {
+        return values.last?.array
+    }
+    
     public var blob: Data? {
-        guard let last = values.last else {
-            return nil
-        }
-        return last.blob
+        return values.last?.blob
     }
 }
 
